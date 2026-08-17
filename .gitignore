@@ -10,3 +10,7 @@ infra/.terraform/
 *.tfstate
 *.tfstate.*
 .terraform.lock.hcl
+
+# Terraform secrets
+infra/terraform.tfvars
+terraform.tfvars
