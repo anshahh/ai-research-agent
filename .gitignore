@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+.env
+*.state.json
+.DS_Store
+run_state.json
+# Terraform
+infra/.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
