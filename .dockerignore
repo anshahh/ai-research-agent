@@ -1,0 +1,13 @@
+venv/
+.git/
+.env
+__pycache__/
+*.pyc
+*.db
+run_state.json
+gateway/venv/
+gateway/.env
+gateway/__pycache__/
+gateway/*.db
+infra/.terraform/
+infra/terraform.tfstate*

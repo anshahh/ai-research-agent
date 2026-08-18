@@ -25,7 +25,9 @@ load_dotenv()
 app = FastAPI(title="Agent + Gateway Dashboard")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-GATEWAY_DB_PATH = BASE_DIR / "gateway" / "gateway_decisions.db"
+GATEWAY_DB_PATH = Path(
+    os.environ.get("GATEWAY_DB_PATH", str(BASE_DIR / "gateway" / "gateway_decisions.db"))
+)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

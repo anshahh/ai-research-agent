@@ -10,13 +10,14 @@ SQLite for today's scope — durable, zero setup, good enough for a
 portfolio project's request volume.
 """
 
+import os
 import sqlite3
 import uuid
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-DB_PATH = "gateway_decisions.db"
+DB_PATH = os.environ.get("GATEWAY_DB_PATH", "gateway_decisions.db")
 
 
 def init_log_db(path: str = DB_PATH):
