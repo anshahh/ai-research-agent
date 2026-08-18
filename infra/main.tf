@@ -61,6 +61,11 @@ resource "aws_db_instance" "agent_db" {
   publicly_accessible     = true
   skip_final_snapshot     = true
   backup_retention_period = 0
+
+  tags = {
+    Project = "ai-research-agent"
+    ManagedBy = "terraform"
+  }
 }
 
 output "db_endpoint" {
