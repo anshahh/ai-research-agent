@@ -15,6 +15,7 @@ exactly 0.0, which without it would look identical to clean text.
 
 import os
 import json
+import re
 import logging
 from dataclasses import dataclass
 
@@ -67,8 +68,10 @@ def judge_if_ambiguous(text: str, regex_score: float, force_escalate: bool = Fal
             messages=[{"role": "user", "content": text}],
         )
         raw = "".join(b.text for b in response.content if b.type == "text").strip()
-        raw = raw.replace("```json", "").replace("```", "").strip()
-        parsed = json.loads(raw)
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            raise ValueError(f"No JSON object found in judge response: {raw!r}")
+        parsed = json.loads(match.group())
         return JudgeResult(
             is_attack=bool(parsed.get("is_attack", False)),
             confidence=float(parsed.get("confidence", 0.0)),
