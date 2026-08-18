@@ -108,14 +108,18 @@ class Agent:
         )
         return False
 
-    def run(self, goal: str, save_path: str = "run_state.json") -> AgentState:
+    def run(self, goal: str, save_path: str = "run_state.json", use_db: bool = True) -> AgentState:
         """Full run: plan, then execute every step, saving state after each one."""
         state = self.plan(goal)
         state.save(save_path)
+        if use_db:
+            state.save_to_db()
 
         while (step := state.next_pending_step()) is not None:
             self.execute_step(state, step)
             state.save(save_path)
+            if use_db:
+                state.save_to_db()
 
         logger.info("Run complete.\n%s", state.summary())
         return state
