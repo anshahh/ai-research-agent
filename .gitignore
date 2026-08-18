@@ -14,3 +14,16 @@ infra/.terraform/
 # Terraform secrets
 infra/terraform.tfvars
 terraform.tfvars
+
+# Gateway
+gateway/.env
+gateway/*.db
+gateway/__pycache__/
+gateway/src/__pycache__/
+gateway/tests/__pycache__/
+
+# Terraform state (contains sensitive data)
+infra/terraform.tfstate
+infra/terraform.tfstate.backup
+infra/*.tfstate
+infra/*.tfstate.backup

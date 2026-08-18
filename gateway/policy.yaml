@@ -1,0 +1,30 @@
+# Gateway policy configuration.
+#
+# Purpose: policy is configuration, not code. Changing what the gateway
+# blocks/allows should mean editing this file, not editing Python.
+
+version: 1
+
+input_pipeline:
+  pii_detection:
+    enabled: true
+    action: redact
+    categories:
+      - email
+      - phone_us
+      - ssn
+      - credit_card
+      - api_key_generic
+      - aws_access_key
+
+  injection_detection:
+    enabled: true
+    action: block
+    block_threshold: 0.6
+
+output_pipeline:
+  pii_leak_scan:
+    enabled: true
+    action: redact
+
+fail_mode: closed
