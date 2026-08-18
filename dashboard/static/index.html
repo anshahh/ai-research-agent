@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Agent + Gateway Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #171a23;
+    --border: #2a2e3a;
+    --text: #e4e6eb;
+    --muted: #8b90a0;
+    --accent: #6ea8fe;
+    --green: #4ade80;
+    --yellow: #fbbf24;
+    --red: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 24px;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px 0; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .summary-row { display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
+  .summary-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; min-width: 130px; }
+  .summary-card .value { font-size: 22px; font-weight: 700; }
+  .summary-card .label { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; }
+  .tab { padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--muted); border: 1px solid transparent; }
+  .tab.active { background: var(--panel); border-color: var(--border); color: var(--text); }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  .run-card, .decision-row { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 10px; }
+  .run-header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .run-goal { font-weight: 600; font-size: 14px; }
+  .run-time { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .run-meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .step-list { margin-top: 10px; padding-left: 0; list-style: none; }
+  .step-list li { font-size: 12px; padding: 4px 0; border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: baseline; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+  .status-done { background: var(--green); }
+  .status-skipped { background: var(--yellow); }
+  .status-pending { background: var(--muted); }
+  .report-toggle { margin-top: 10px; font-size: 12px; color: var(--accent); cursor: pointer; user-select: none; }
+  .report-body { display: none; margin-top: 8px; font-size: 12px; color: var(--text); white-space: pre-wrap; background: #0f1117; border-radius: 6px; padding: 10px; max-height: 300px; overflow-y: auto; }
+  .report-body.open { display: block; }
+  .decision-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .decision-left { display: flex; align-items: center; gap: 10px; }
+  .badge { font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 12px; text-transform: uppercase; }
+  .badge-allow { background: rgba(74,222,128,0.15); color: var(--green); }
+  .badge-redact { background: rgba(251,191,36,0.15); color: var(--yellow); }
+  .badge-block { background: rgba(248,113,113,0.15); color: var(--red); }
+  .decision-reasons { font-size: 12px; color: var(--muted); }
+  .decision-latency { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .empty-state { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
+  .error-state { color: var(--red); font-size: 13px; padding: 12px; background: rgba(248,113,113,0.1); border-radius: 6px; }
+</style>
+</head>
+<body>
+
+<h1>Agent + Gateway Dashboard</h1>
+<div class="subtitle">Live view of agent runs and gateway security decisions. Refreshes every 3 seconds.</div>
+
+<div class="summary-row" id="summary"></div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="runs">Agent Runs</div>
+  <div class="tab" data-tab="decisions">Gateway Decisions</div>
+</div>
+
+<div class="panel active" id="panel-runs"></div>
+<div class="panel" id="panel-decisions"></div>
+
+<script>
+function timeAgo(isoString) {
+  const diffMs = Date.now() - new Date(isoString).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + "m ago";
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + "h ago";
+  return Math.floor(hrs / 24) + "d ago";
+}
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+async function loadSummary() {
+  try {
+    const res = await fetch("/api/summary");
+    const data = await res.json();
+    document.getElementById("summary").innerHTML =
+      '<div class="summary-card"><div class="value">' + data.total_runs + '</div><div class="label">Agent runs</div></div>' +
+      '<div class="summary-card"><div class="value">' + data.total_gateway_requests + '</div><div class="label">Gateway requests</div></div>' +
+      '<div class="summary-card"><div class="value">' + data.total_blocked + '</div><div class="label">Blocked</div></div>' +
+      '<div class="summary-card"><div class="value">' + data.total_redacted + '</div><div class="label">Redacted</div></div>';
+  } catch (e) {}
+}
+
+async function loadRuns() {
+  const panel = document.getElementById("panel-runs");
+  try {
+    const res = await fetch("/api/agent-runs");
+    const data = await res.json();
+
+    if (data.error) {
+      panel.innerHTML = '<div class="error-state">' + escapeHtml(data.error) + '</div>';
+      return;
+    }
+    if (!data.runs.length) {
+      panel.innerHTML = '<div class="empty-state">No agent runs yet. Run python3 -m src.agent to create one.</div>';
+      return;
+    }
+
+    panel.innerHTML = data.runs.map(function(run, i) {
+      const stepsHtml = run.steps.map(function(s) {
+        return '<li><span class="status-dot status-' + s.status + '"></span>' +
+          escapeHtml(s.description) +
+          '<span style="color:var(--muted)"> (' + s.tool + ', attempts=' + s.attempts + ')</span></li>';
+      }).join("");
+
+      const reportId = 'report-' + i;
+      let reportHtml = "";
+      if (run.has_report) {
+        reportHtml = '<div class="report-toggle" onclick="document.getElementById(\'' + reportId + '\').classList.toggle(\'open\')">View final report</div>' +
+          '<div class="report-body" id="' + reportId + '">' + escapeHtml(run.final_report) + '</div>';
+      }
+
+      return '<div class="run-card">' +
+        '<div class="run-header"><div class="run-goal">' + escapeHtml(run.goal) + '</div>' +
+        '<div class="run-time">' + timeAgo(run.created_at) + '</div></div>' +
+        '<div class="run-meta">' + run.steps_done + ' done, ' + run.steps_skipped + ' skipped &middot; ' + run.evidence_count + ' evidence items</div>' +
+        '<ul class="step-list">' + stepsHtml + '</ul>' +
+        reportHtml +
+        '</div>';
+    }).join("");
+  } catch (e) {
+    panel.innerHTML = '<div class="error-state">Could not load agent runs: ' + escapeHtml(String(e)) + '</div>';
+  }
+}
+
+async function loadDecisions() {
+  const panel = document.getElementById("panel-decisions");
+  try {
+    const res = await fetch("/api/gateway-decisions");
+    const data = await res.json();
+
+    if (data.error) {
+      panel.innerHTML = '<div class="error-state">' + escapeHtml(data.error) + '</div>';
+      return;
+    }
+    if (!data.decisions.length) {
+      panel.innerHTML = '<div class="empty-state">No gateway decisions yet.</div>';
+      return;
+    }
+
+    panel.innerHTML = data.decisions.map(function(d) {
+      const reasons = (d.reasons || []).join("; ");
+      return '<div class="decision-row"><div class="decision-left">' +
+        '<span class="badge badge-' + d.action + '">' + d.action + '</span>' +
+        '<span style="font-size:12px;color:var(--muted)">' + d.direction + '</span>' +
+        '<span class="decision-reasons">' + (escapeHtml(reasons) || "no issues found") + '</span></div>' +
+        '<div class="decision-latency">' + d.latency_ms.toFixed(0) + 'ms &middot; ' + timeAgo(d.timestamp) + '</div></div>';
+    }).join("");
+  } catch (e) {
+    panel.innerHTML = '<div class="error-state">Could not load gateway decisions: ' + escapeHtml(String(e)) + '</div>';
+  }
+}
+
+function refreshAll() {
+  loadSummary();
+  loadRuns();
+  loadDecisions();
+}
+
+document.querySelectorAll(".tab").forEach(function(tab) {
+  tab.addEventListener("click", function() {
+    document.querySelectorAll(".tab").forEach(function(t) { t.classList.remove("active"); });
+    document.querySelectorAll(".panel").forEach(function(p) { p.classList.remove("active"); });
+    tab.classList.add("active");
+    document.getElementById("panel-" + tab.dataset.tab).classList.add("active");
+  });
+});
+
+refreshAll();
+setInterval(refreshAll, 3000);
+</script>
+
+</body>
+</html>
