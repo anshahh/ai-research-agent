@@ -1,10 +1,11 @@
 """
-LLM client wrapper.
+LLM client wrapper — now routed through the security gateway.
 
-Purpose: every model call in this project goes through here — never call
-the Anthropic SDK directly from agent.py or anywhere else. This is what
-lets you swap models, add caching, or change retry behavior in one place
-later without touching application code.
+Purpose: every model call in this project goes through here. Previously
+this called the Anthropic API directly; now it calls the gateway's
+/v1/chat endpoint instead, so every planning/tool-use call the agent
+makes is screened for injection attempts and PII before reaching
+Claude, and every response is scanned before the agent acts on it.
 """
 
 import os
@@ -14,103 +15,103 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-import anthropic
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
 logger = logging.getLogger("llm_client")
 
+GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8010")
+GATEWAY_API_KEY = os.environ.get("GATEWAY_API_KEY")
+
 
 @dataclass
 class LLMResponse:
     text: str
     model: str
-    input_tokens: int
-    output_tokens: int
-    stop_reason: str
+    input_action: str
+    output_action: str
+    request_id: str
+
+
+class GatewayBlockedError(Exception):
+    """Raised when the gateway blocks a request outright. Not retried —
+    retrying the exact same blocked text will just get blocked again."""
 
 
 class LLMClient:
-    def __init__(
-        self,
-        model: str = "claude-sonnet-4-6",
-        max_retries: int = 3,
-        base_delay: float = 1.0,
-        timeout: float = 60.0,
-    ):
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
+    def __init__(self, max_retries: int = 3, base_delay: float = 1.0, timeout: float = 60.0):
+        if not GATEWAY_API_KEY:
             raise RuntimeError(
-                "ANTHROPIC_API_KEY not set. Put it in your .env file "
-                "(and make sure .env is in .gitignore)."
+                "GATEWAY_API_KEY not set. Put it in your .env file — "
+                "must match a key in the gateway's GATEWAY_API_KEYS."
             )
-        self.client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
-        self.model = model
         self.max_retries = max_retries
         self.base_delay = base_delay
+        self.timeout = timeout
 
-    def call(
-        self,
-        system: str,
-        messages: list,
-        max_tokens: int = 1024,
-        temperature: float = 0.0,
-    ) -> LLMResponse:
-        """
-        Single point of entry for every model call in the project.
-        Retries on transient errors (rate limits, timeouts, 5xx) with
-        exponential backoff + jitter. Does NOT retry on bad-request-type
-        errors — those will just fail the same way again.
-        """
+    def call(self, system: str, messages: list, max_tokens: int = 1024, temperature: float = 0.0) -> LLMResponse:
+        user_content = messages[-1]["content"] if messages else ""
         last_error: Optional[Exception] = None
 
         for attempt in range(self.max_retries):
             try:
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    system=system,
-                    messages=messages,
+                response = requests.post(
+                    f"{GATEWAY_URL}/v1/chat",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {GATEWAY_API_KEY}",
+                    },
+                    json={"message": user_content, "system": system, "max_tokens": max_tokens},
+                    timeout=self.timeout,
                 )
-                text = "".join(
-                    block.text for block in response.content if block.type == "text"
-                )
+
+                if response.status_code == 400:
+                    detail = response.json().get("detail", {})
+                    reasons = detail.get("reasons", []) if isinstance(detail, dict) else []
+                    logger.error("Request BLOCKED by gateway: %s", reasons)
+                    raise GatewayBlockedError(f"Blocked by gateway security policy: {reasons}")
+
+                if response.status_code == 401:
+                    raise RuntimeError(f"Gateway auth failed: {response.text}")
+
+                if response.status_code == 429:
+                    raise requests.exceptions.RequestException(f"Rate limited by gateway: {response.text}")
+
+                response.raise_for_status()
+                data = response.json()
+
                 return LLMResponse(
-                    text=text,
-                    model=response.model,
-                    input_tokens=response.usage.input_tokens,
-                    output_tokens=response.usage.output_tokens,
-                    stop_reason=response.stop_reason,
+                    text=data["response"],
+                    model="claude-sonnet-4-6",
+                    input_action=data["input_action"],
+                    output_action=data["output_action"],
+                    request_id=data["request_id"],
                 )
 
-            except (
-                anthropic.RateLimitError,
-                anthropic.APITimeoutError,
-                anthropic.InternalServerError,
-                anthropic.APIConnectionError,
-            ) as e:
-                last_error = e
-                delay = self.base_delay * (2 ** attempt) + random.uniform(0, 0.5)
-                logger.warning(
-                    "LLM call failed (attempt %d/%d): %s. Retrying in %.1fs",
-                    attempt + 1, self.max_retries, e, delay,
-                )
-                time.sleep(delay)
-
-            except anthropic.BadRequestError as e:
-                # Not retryable — malformed request, won't fix itself.
-                logger.error("Non-retryable LLM error: %s", e)
+            except GatewayBlockedError:
                 raise
 
-        logger.error("LLM call failed after %d attempts", self.max_retries)
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                last_error = e
+                delay = self.base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+                logger.warning("Gateway call failed (attempt %d/%d): %s. Retrying in %.1fs",
+                               attempt + 1, self.max_retries, e, delay)
+                time.sleep(delay)
+
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                delay = self.base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+                logger.warning("Gateway call failed (attempt %d/%d): %s. Retrying in %.1fs",
+                               attempt + 1, self.max_retries, e, delay)
+                time.sleep(delay)
+
+        logger.error("Gateway call failed after %d attempts", self.max_retries)
         raise last_error
 
 
 if __name__ == "__main__":
-    # Quick smoke test — run `python3 src/llm_client.py` after setting
-    # ANTHROPIC_API_KEY to confirm this works before building on top of it.
     logging.basicConfig(level=logging.INFO)
     client = LLMClient()
     result = client.call(

@@ -103,6 +103,7 @@ class AgentState:
     run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     steps: list = field(default_factory=list)
     evidence: list = field(default_factory=list)
+    final_report: Optional[str] = None
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
