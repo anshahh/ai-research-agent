@@ -7,18 +7,26 @@ collected. Keeping this as real state (not just buried in a chat history
 list) is what makes retry/recovery possible: the agent can look at this
 object and know exactly what still needs doing.
 
-Starts in-memory / JSON-file backed for day one. Swap for Postgres once
-the loop itself is working — don't build the database before you know
-the shape of what you're storing.
+Two persistence backends are supported:
+- JSON file (save/load) — simple, local, good for quick tests.
+- Postgres (save_to_db/load_from_db) — durable, remote, what a real
+  deployed system would use so state survives a crash or restart of
+  whatever machine the agent is running on.
 """
 
 import json
-from os import path
+import os
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
+
+import psycopg2
+from psycopg2.extras import Json
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 class StepStatus(str, Enum):
@@ -49,6 +57,44 @@ class Evidence:
     collected_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+
+
+def _get_db_connection():
+    """
+    Single point of entry for database connections. Reads credentials
+    from environment variables (loaded from .env) — never hardcode
+    connection details anywhere else in the codebase.
+    """
+    return psycopg2.connect(
+        host=os.environ["DB_HOST"],
+        port=os.environ.get("DB_PORT", 5432),
+        dbname=os.environ.get("DB_NAME", "postgres"),
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+    )
+
+
+def init_db():
+    """
+    Create the runs table if it doesn't exist yet. Safe to call every
+    time the app starts — CREATE TABLE IF NOT EXISTS is idempotent.
+    Run this once before using save_to_db/load_from_db.
+    """
+    conn = _get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    run_id UUID PRIMARY KEY,
+                    goal TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    state JSONB NOT NULL
+                );
+            """)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @dataclass
@@ -86,6 +132,8 @@ class AgentState:
             lines.append(f"  [{s.status.value}] {s.description} (attempts={s.attempts})")
         return "\n".join(lines)
 
+    # --- JSON file persistence (local, simple) ---
+
     def save(self, path: str):
         with open(path, "w") as f:
             json.dump(asdict(self), f, indent=2, default=str)
@@ -101,3 +149,69 @@ class AgentState:
         ]
         state.evidence = [Evidence(**e) for e in data["evidence"]]
         return state
+
+    # --- Postgres persistence (durable, remote) ---
+
+    def save_to_db(self):
+        """
+        Upsert this run's full state as JSONB. Storing the whole state
+        as one JSON blob (rather than normalizing steps/evidence into
+        their own tables) keeps this simple for a portfolio project —
+        worth mentioning as a deliberate tradeoff if asked: fast to
+        build, easy to query as a whole run, less ideal if you needed
+        to query across steps/evidence with SQL filters at scale.
+        """
+        conn = _get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO agent_runs (run_id, goal, created_at, updated_at, state)
+                    VALUES (%s, %s, %s, now(), %s)
+                    ON CONFLICT (run_id)
+                    DO UPDATE SET state = EXCLUDED.state, updated_at = now();
+                    """,
+                    (self.run_id, self.goal, self.created_at, Json(json.loads(json.dumps(asdict(self), default=str)))),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @classmethod
+    def load_from_db(cls, run_id: str) -> "AgentState":
+        conn = _get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT state FROM agent_runs WHERE run_id = %s;",
+                    (run_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise ValueError(f"No run found with run_id={run_id}")
+                data = row[0]
+        finally:
+            conn.close()
+
+        state = cls(goal=data["goal"], run_id=data["run_id"], created_at=data["created_at"])
+        state.steps = [
+            Step(**{**s, "status": StepStatus(s["status"])})
+            for s in data["steps"]
+        ]
+        state.evidence = [Evidence(**e) for e in data["evidence"]]
+        return state
+
+    @staticmethod
+    def list_runs(limit: int = 20) -> list:
+        """Returns a list of (run_id, goal, created_at) tuples, most recent first."""
+        conn = _get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT run_id, goal, created_at FROM agent_runs "
+                    "ORDER BY created_at DESC LIMIT %s;",
+                    (limit,),
+                )
+                return cur.fetchall()
+        finally:
+            conn.close()
